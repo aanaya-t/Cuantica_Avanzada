@@ -1,6 +1,6 @@
 % Model:              PROYECTO.mph
 % Version:            COMSOL 5.6.0.280
-% Date:               Jul 11 2026, 14:50
+% Date:               Jul 11 2026, 14:53
 % Table:              Tabla 4 - Valor propio
 % R_1 (nm)                                        lambda                                            Energía propia (meV)                              Probabilidad total (1)
 7                                                 -0.02063255062960273                              -20.63255062960273                                1.0000000000000024
