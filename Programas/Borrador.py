@@ -5,26 +5,35 @@ Que hace:
   1) Abre una ventana para elegir uno o varios archivos .txt.
   2) Para cada archivo, DETECTA AUTOMATICAMENTE si es:
        - Un BARRIDO SIMPLE (una sola variable, ej. x_0): grafica lineas
-         Energia vs esa variable, una linea por estado propio. Si eliges
-         varios archivos de este tipo, los junta en un MOSAICO.
+         Energia vs esa variable, una linea por estado propio, siguiendo
+         cada estado por CONTINUIDAD (ver mas abajo). Si eliges varios
+         archivos de este tipo, los junta en un MOSAICO.
        - Un BARRIDO DOBLE (dos variables, ej. B y n): arma una rejilla y
          grafica, en una misma ventana, una superficie 3D (rotable con el
-         mouse) y un mapa de colores 2D equivalente. Como una superficie
-         solo puede mostrar UN estado a la vez, te deja ELEGIR cual
-         estado/superficie quieres ver (segun la configuracion).
+         mouse) y un mapa de colores 2D equivalente, con botones y flechas
+         de teclado para cambiar de estado SIN CERRAR LA VENTANA.
+       - Un archivo de DENSIDAD DE PROBABILIDAD (grilla espacial X,Y con
+         un estado por columna, ej. "psi*conj(psi) ... @ lambda=N, F=W"):
+         se grafica igual que el barrido doble (superficie 3D + mapa 2D
+         navegable), pero los ejes son las coordenadas espaciales.
        - El formato "ancho" ya exportado por seleccionar_y_exportar_barrido.py
          (una columna por estado): se grafica como barrido simple.
-  3) Los nombres de los ejes salen del propio archivo (encabezado '%' de
+  3) TRACKING POR CONTINUIDAD (barrido simple): en vez de asumir que el
+     estado en la posicion i de cada bloque siempre es "el mismo" estado,
+     cada nuevo bloque se empareja con el bloque anterior por CERCANIA DE
+     ENERGIA (nearest-neighbor), para que las lineas no salten si COMSOL
+     reordena los estados entre puntos vecinos del barrido. Se puede
+     desactivar con TRACKEAR_POR_CONTINUIDAD = False.
+  4) Los nombres de los ejes salen del propio archivo (encabezado '%' de
      COMSOL, nombre del archivo, o unidad detectada), no estan fijos.
-  4) Soporta valores complejos (formato COMSOL "a+bi") y deja elegir si se
+  5) Soporta valores complejos (formato COMSOL "a+bi") y deja elegir si se
      grafica la parte real o imaginaria.
-  5) Es tolerante a filas mal formadas, columnas de distinto tamano, etc.
+  6) Es tolerante a filas mal formadas, columnas de distinto tamano, etc.
 
 PENDIENTE (a futuro, todavia no implementado):
-  - Tracking de estados por continuidad (energia o solapamiento) entre
-    combinaciones vecinas de la rejilla, en vez de tomar el estado por
-    posicion fija dentro de cada bloque. Ver la funcion
-    trackear_por_continuidad() al final del archivo.
+  - Tracking por continuidad para la REJILLA de un barrido doble (o de la
+    densidad de probabilidad) en las dos direcciones a la vez. Por ahora
+    el tracking por continuidad solo aplica al barrido simple (1 variable).
 
 Uso:
     python graficar_barrido_todo_en_uno.py
@@ -35,6 +44,7 @@ import re
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (habilita projection="3d")
 
 # =============================================================================
@@ -63,8 +73,15 @@ GRAFICAR_PARTE_REAL = True
 MODO_SELECCION_ESTADOS = "todos"  # "todos" | "numero" | "elegir"
 NUMERO_ESTADOS = 5                  # se usa solo si el modo es "numero"
 
-# --- Config. especifica de BARRIDO DOBLE (superficie 3D + mapa 2D) ---
-# Como una superficie solo puede mostrar un estado a la vez:
+# Si True, cada estado se sigue por CONTINUIDAD DE ENERGIA entre puntos
+# vecinos del barrido (en vez de por su posicion fija dentro del bloque).
+# Evita "saltos" en las lineas si COMSOL reordena los estados.
+TRACKEAR_POR_CONTINUIDAD = True
+
+# --- Config. especifica de BARRIDO DOBLE y DENSIDAD DE PROBABILIDAD ---
+# (superficie 3D + mapa 2D). Como una superficie solo muestra un estado a
+# la vez, esta config decide cual se ve primero (despues se puede navegar
+# con botones/flechas sin cerrar la ventana):
 #   "elegir" -> abre una ventana para elegir cual estado/superficie ver
 #   "numero" -> usa directamente ESTADO_A_GRAFICAR_3D, sin preguntar
 MODO_SELECCION_ESTADO_3D = "elegir"  # "numero" | "elegir"
@@ -194,6 +211,88 @@ def leer_formato_ancho(lineas_datos, lineas_crudas=None):
 # Lectura: formato crudo de COMSOL (con soporte para 1 o 2 variables barridas)
 # =============================================================================
 
+# =============================================================================
+# Lectura: formato de DENSIDAD DE PROBABILIDAD (grilla espacial X,Y, con
+# un estado por columna, ej. "psi*conj(psi) ... @ lambda=N, F=W")
+# =============================================================================
+
+def obtener_ultima_linea_encabezado(lineas_crudas):
+    """Devuelve el contenido (sin el '%') de la ultima linea de encabezado,
+    que en los archivos de COMSOL trae los nombres/expresiones de columna."""
+    ultima = None
+    for linea in lineas_crudas:
+        l = linea.strip()
+        if l.startswith("%"):
+            ultima = l.lstrip("%").strip()
+    return ultima
+
+
+def extraer_etiquetas_estado_densidad(encabezado_completo):
+    """Extrae, en orden, las etiquetas 'lambda=N[, F=W]' de un encabezado
+    de COMSOL tipo 'psi*conj(psi) (1) @ lambda=1, F=-25 psi*conj(psi) ...'.
+    Devuelve None si no encuentra el patron (no es un archivo de este tipo)."""
+    if not encabezado_completo:
+        return None
+    matches = re.findall(r"@\s*lambda\s*=\s*([\-\d.]+)(?:,\s*F\s*=\s*([\-\d.]+))?", encabezado_completo)
+    if not matches:
+        return None
+    etiquetas = []
+    for lam, f in matches:
+        etiquetas.append(f"lambda={lam}, F={f}" if f else f"lambda={lam}")
+    return etiquetas
+
+
+def leer_formato_densidad(lineas_datos, etiquetas_estado):
+    """Lee un archivo de densidad de probabilidad: columnas X, Y (grilla
+    espacial) seguidas de una columna de valor por cada estado. Devuelve
+    x_unicos, y_unicos (coordenadas ordenadas) y Zs, un arreglo
+    (n_estados, len(y_unicos), len(x_unicos)) con el valor de cada estado
+    en cada punto de la grilla (NaN donde no hay dato)."""
+    filas = []
+    n_cols_esperadas = None
+    for linea in lineas_datos:
+        valores = linea.split()
+        try:
+            fila = [float(v) for v in valores]
+        except ValueError:
+            continue
+        if not fila:
+            continue
+        if n_cols_esperadas is None:
+            n_cols_esperadas = len(fila)
+        if len(fila) != n_cols_esperadas:
+            continue
+        filas.append(fila)
+
+    if not filas:
+        raise ValueError("No se encontraron filas de datos numericas validas en el archivo.")
+
+    datos = np.array(filas)
+    n_cols = datos.shape[1]
+    if n_cols < 3:
+        raise ValueError(f"Se esperaban al menos 3 columnas (X, Y, estado), el archivo tiene {n_cols}.")
+
+    n_estados = n_cols - 2
+    if not etiquetas_estado or len(etiquetas_estado) != n_estados:
+        etiquetas_estado = [f"Estado {i + 1}" for i in range(n_estados)]
+
+    x_col = np.round(datos[:, 0], 12)
+    y_col = np.round(datos[:, 1], 12)
+
+    x_unicos = np.array(sorted(set(x_col)))
+    y_unicos = np.array(sorted(set(y_col)))
+    idx_x = {v: j for j, v in enumerate(x_unicos)}
+    idx_y = {v: i for i, v in enumerate(y_unicos)}
+
+    i_arr = np.array([idx_y[v] for v in y_col])
+    j_arr = np.array([idx_x[v] for v in x_col])
+
+    Zs = np.full((n_estados, len(y_unicos), len(x_unicos)), np.nan)
+    Zs[:, i_arr, j_arr] = datos[:, 2:].T  # (n_estados, n_filas), asignado por fila via fancy indexing
+
+    return x_unicos, y_unicos, Zs, etiquetas_estado
+
+
 def leer_filas_numericas(lineas_datos):
     """Parsea todas las filas de datos (reales o complejas), descartando
     las que no coincidan en numero de columnas con la mayoria."""
@@ -277,10 +376,62 @@ def es_doble_barrido(bloques):
     return es_doble, x_valores, v2_valores_totales
 
 
+def trackear_por_continuidad(listas_valores):
+    """Reordena los valores de cada bloque (lista de listas de energias, en
+    orden de aparicion del barrido) para que cada 'rama' seguida a lo largo
+    de los bloques corresponda al MISMO estado fisico, en vez de a la
+    misma POSICION dentro del bloque.
+
+    Usa un emparejamiento voraz por cercania de energia respecto al bloque
+    anterior (nearest-neighbor tracking): para cada par (valor_anterior,
+    valor_actual), se van tomando primero las coincidencias mas cercanas
+    de TODAS las combinaciones posibles, evitando reusar un valor ya
+    emparejado. Los valores del bloque actual que no calzan con ninguno
+    del anterior (ej. aparece un estado nuevo) se agregan al final.
+
+    Devuelve una nueva lista de listas, alineadas por continuidad."""
+    if not listas_valores:
+        return listas_valores
+
+    resultado = [list(listas_valores[0])]
+
+    for bloque in listas_valores[1:]:
+        anterior = resultado[-1]
+        disponibles = list(bloque)
+        nuevo_bloque = [np.nan] * len(anterior)
+
+        pares = []
+        for i, va in enumerate(anterior):
+            if va is None or (isinstance(va, float) and np.isnan(va)):
+                continue
+            for j, vb in enumerate(disponibles):
+                if vb is None or (isinstance(vb, float) and np.isnan(vb)):
+                    continue
+                pares.append((abs(va - vb), i, j))
+        pares.sort(key=lambda t: t[0])
+
+        usados_i, usados_j = set(), set()
+        for _, i, j in pares:
+            if i in usados_i or j in usados_j:
+                continue
+            nuevo_bloque[i] = disponibles[j]
+            usados_i.add(i)
+            usados_j.add(j)
+
+        sobrantes = [disponibles[j] for j in range(len(disponibles)) if j not in usados_j]
+        nuevo_bloque.extend(sobrantes)
+
+        resultado.append(nuevo_bloque)
+
+    return resultado
+
+
 def armar_ramas_barrido_simple(bloques):
     """A partir de los bloques (agrupados por (x, v2), pero v2 se ignora
     porque es barrido simple), arma x0_unicos y la matriz de ramas, igual
-    que en el barrido de una sola variable."""
+    que en el barrido de una sola variable. Si TRACKEAR_POR_CONTINUIDAD
+    esta activo, cada estado se sigue por cercania de energia entre
+    bloques vecinos en vez de por posicion fija."""
     x0_unicos = []
     listas_valores = []
     x_actual = None
@@ -298,6 +449,9 @@ def armar_ramas_barrido_simple(bloques):
     if x_actual is not None:
         x0_unicos.append(x_actual)
         listas_valores.append(valores_actual)
+
+    if TRACKEAR_POR_CONTINUIDAD:
+        listas_valores = trackear_por_continuidad(listas_valores)
 
     n_ramas = max(len(v) for v in listas_valores)
     ramas = np.full((n_ramas, len(x0_unicos)), np.nan)
@@ -335,12 +489,28 @@ def procesar_archivo(ruta_archivo):
     with open(ruta_archivo, "r", encoding="utf-8", errors="ignore") as f:
         lineas_crudas = [l.rstrip("\n") for l in f]
 
-    nombres_columnas = detectar_nombres_columnas_comsol(lineas_crudas)
+    encabezado_completo = obtener_ultima_linea_encabezado(lineas_crudas)
+    etiquetas_densidad = extraer_etiquetas_estado_densidad(encabezado_completo)
+
     lineas_datos = [l.strip() for l in lineas_crudas
                      if l.strip() and not l.strip().startswith("%")]
 
     if not lineas_datos:
         raise ValueError("El archivo no contiene filas de datos.")
+
+    # --- Densidad de probabilidad (grilla espacial X,Y + un estado por columna) ---
+    if etiquetas_densidad:
+        x_unicos, y_unicos, Zs, etiquetas_estado = leer_formato_densidad(lineas_datos, etiquetas_densidad)
+        partes_encabezado = re.split(r"\s{2,}", encabezado_completo, maxsplit=2)
+        nombre_x_espacial = partes_encabezado[0].strip() if len(partes_encabezado) > 0 else "X"
+        nombre_y_espacial = partes_encabezado[1].strip() if len(partes_encabezado) > 1 else "Y"
+        return {
+            "tipo": "densidad", "x_unicos": x_unicos, "y_unicos": y_unicos, "Zs": Zs,
+            "etiquetas": etiquetas_estado, "nombre_x": nombre_x_espacial, "nombre_y_espacial": nombre_y_espacial,
+            "nombre_valor": "Densidad de probabilidad", "nombre_archivo": nombre_archivo,
+        }
+
+    nombres_columnas = detectar_nombres_columnas_comsol(lineas_crudas)
 
     primera_linea = lineas_datos[0]
     primer_token = primera_linea.split("\t")[0] if "\t" in primera_linea else primera_linea.split()[0]
@@ -469,19 +639,21 @@ def elegir_estados_gui(etiquetas, nombre_archivo=""):
     return seleccion
 
 
-def obtener_estado_3d(n_estados_disponibles, nombre_archivo=""):
-    """Devuelve el indice (0-indexado) del estado a graficar como
-    superficie, segun MODO_SELECCION_ESTADO_3D."""
+def obtener_estado_unico(etiquetas, nombre_archivo=""):
+    """Devuelve el indice (0-indexado) de UN estado a graficar (superficie
+    3D / mapa 2D), segun MODO_SELECCION_ESTADO_3D. 'etiquetas' es la lista
+    de nombres a mostrar (uno por estado disponible)."""
+    n_estados_disponibles = len(etiquetas)
     if MODO_SELECCION_ESTADO_3D == "numero":
         idx = min(max(ESTADO_A_GRAFICAR_3D, 1), n_estados_disponibles) - 1
         return idx
     elif MODO_SELECCION_ESTADO_3D == "elegir":
-        return elegir_estado_3d_gui(n_estados_disponibles, nombre_archivo)
+        return elegir_estado_unico_gui(etiquetas, nombre_archivo)
     else:
         raise ValueError(f"MODO_SELECCION_ESTADO_3D invalido: '{MODO_SELECCION_ESTADO_3D}'.")
 
 
-def elegir_estado_3d_gui(n_estados_disponibles, nombre_archivo=""):
+def elegir_estado_unico_gui(etiquetas, nombre_archivo=""):
     import tkinter as tk
     from tkinter import messagebox
 
@@ -502,12 +674,12 @@ def elegir_estado_3d_gui(n_estados_disponibles, nombre_archivo=""):
     frame.pack(padx=10, pady=5, fill="both", expand=True)
     scrollbar = tk.Scrollbar(frame, orient="vertical")
     listbox = tk.Listbox(frame, selectmode=tk.BROWSE, width=40,
-                           height=min(15, n_estados_disponibles), yscrollcommand=scrollbar.set)
+                           height=min(15, len(etiquetas)), yscrollcommand=scrollbar.set)
     scrollbar.config(command=listbox.yview)
     scrollbar.pack(side="right", fill="y")
     listbox.pack(side="left", fill="both", expand=True)
-    for i in range(n_estados_disponibles):
-        listbox.insert(tk.END, f"Estado {i + 1}")
+    for et in etiquetas:
+        listbox.insert(tk.END, et)
     listbox.select_set(0)
 
     def confirmar():
@@ -569,49 +741,111 @@ def graficar_mosaico_lineas(resultados):
     plt.show()
 
 
-def graficar_doble(x_valores, v2_valores, Z, nombre_x, nombre_var2, nombre_valor, titulo):
-    X, Y = np.meshgrid(v2_valores, x_valores)  # forma (len(x_valores), len(v2_valores)) = forma de Z
+def graficar_interactivo_3d_2d(eje_h_vals, eje_v_vals, obtener_z, n_estados,
+                                  nombre_eje_h, nombre_eje_v, obtener_nombre_valor,
+                                  obtener_titulo_estado, nombre_archivo, estado_inicial=0):
+    """Funcion GENERICA de graficado interactivo (superficie 3D + mapa de
+    colores 2D en la misma ventana), usada tanto para barridos dobles de
+    energia como para densidad de probabilidad. Permite cambiar de estado
+    SIN CERRAR LA VENTANA:
+      - Con los botones '< Anterior' / 'Siguiente >' en la parte inferior.
+      - Con las flechas <- / -> del teclado (con la ventana en foco).
 
-    fig = plt.figure(figsize=(14, 6))
-    fig.suptitle(titulo)
+    obtener_z(idx)              -> matriz Z (forma (len(eje_v_vals), len(eje_h_vals)))
+    obtener_nombre_valor(idx)   -> texto para el eje Z / la barra de color
+    obtener_titulo_estado(idx)  -> texto para el titulo de la figura
+    """
+    estado_actual = {"idx": estado_inicial}
 
-    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
-    superficie = ax3d.plot_surface(X, Y, Z, cmap="viridis", edgecolor="none")
-    ax3d.set_xlabel(nombre_var2)
-    ax3d.set_ylabel(nombre_x)
-    ax3d.set_zlabel(nombre_valor)
-    ax3d.set_title("Superficie 3D")
-    fig.colorbar(superficie, ax=ax3d, shrink=0.6, pad=0.1)
+    fig = plt.figure(figsize=(14, 6.5))
+    X, Y = np.meshgrid(eje_h_vals, eje_v_vals)  # forma (len(eje_v_vals), len(eje_h_vals))
 
-    ax2d = fig.add_subplot(1, 2, 2)
-    mapa = ax2d.pcolormesh(X, Y, Z, cmap="viridis", shading="auto")
-    ax2d.set_xlabel(nombre_var2)
-    ax2d.set_ylabel(nombre_x)
-    ax2d.set_title("Mapa de colores 2D")
-    fig.colorbar(mapa, ax=ax2d, label=nombre_valor)
+    def dibujar():
+        fig.clf()
+        idx = estado_actual["idx"]
+        Z = obtener_z(idx)
+        nombre_valor = obtener_nombre_valor(idx)
 
-    plt.tight_layout()
+        fig.suptitle(f"{obtener_titulo_estado(idx)}   (use los botones o las flechas <-/-> del teclado)")
+
+        ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+        superficie = ax3d.plot_surface(X, Y, Z, cmap="viridis", edgecolor="none")
+        ax3d.set_xlabel(nombre_eje_h)
+        ax3d.set_ylabel(nombre_eje_v)
+        ax3d.set_zlabel(nombre_valor)
+        ax3d.set_title("Superficie 3D")
+        fig.colorbar(superficie, ax=ax3d, shrink=0.6, pad=0.1)
+
+        ax2d = fig.add_subplot(1, 2, 2)
+        mapa = ax2d.pcolormesh(X, Y, Z, cmap="viridis", shading="auto")
+        ax2d.set_xlabel(nombre_eje_h)
+        ax2d.set_ylabel(nombre_eje_v)
+        ax2d.set_title("Mapa de colores 2D")
+        fig.colorbar(mapa, ax=ax2d, label=nombre_valor)
+
+        # Botones de navegacion (se re-crean cada vez porque se limpio la figura)
+        ax_prev = fig.add_axes([0.42, 0.02, 0.10, 0.05])
+        ax_next = fig.add_axes([0.53, 0.02, 0.10, 0.05])
+        boton_prev = Button(ax_prev, "< Anterior")
+        boton_next = Button(ax_next, "Siguiente >")
+        boton_prev.on_clicked(ir_anterior)
+        boton_next.on_clicked(ir_siguiente)
+        # se guardan las referencias en la figura para que no las borre el garbage collector
+        fig._botones_navegacion = (boton_prev, boton_next)
+
+        fig.canvas.draw_idle()
+
+    def ir_siguiente(event=None):
+        if estado_actual["idx"] < n_estados - 1:
+            estado_actual["idx"] += 1
+            dibujar()
+
+    def ir_anterior(event=None):
+        if estado_actual["idx"] > 0:
+            estado_actual["idx"] -= 1
+            dibujar()
+
+    def tecla_presionada(event):
+        if event.key == "right":
+            ir_siguiente()
+        elif event.key == "left":
+            ir_anterior()
+
+    fig.canvas.mpl_connect("key_press_event", tecla_presionada)
+
+    dibujar()
     plt.show()
 
 
-# =============================================================================
-# PENDIENTE (a futuro): tracking de estados por continuidad
-# =============================================================================
+def graficar_doble_interactivo(bloques, x_valores, v2_valores, nombre_x, nombre_var2,
+                                  nombre_valor, nombre_archivo, estado_inicial, n_estados_disponibles):
+    """Barrido doble de energia: envoltorio de graficar_interactivo_3d_2d."""
+    graficar_interactivo_3d_2d(
+        eje_h_vals=v2_valores, eje_v_vals=x_valores,
+        obtener_z=lambda idx: construir_grilla(bloques, x_valores, v2_valores, idx),
+        n_estados=n_estados_disponibles,
+        nombre_eje_h=nombre_var2, nombre_eje_v=nombre_x,
+        obtener_nombre_valor=lambda idx: nombre_valor,
+        obtener_titulo_estado=lambda idx: f"{nombre_archivo} - Estado {idx + 1} / {n_estados_disponibles}",
+        nombre_archivo=nombre_archivo,
+        estado_inicial=estado_inicial,
+    )
 
-def trackear_por_continuidad(bloques, x_valores, v2_valores):
-    """PENDIENTE (a futuro, todavia NO implementado).
 
-    Idea: en vez de tomar el estado propio por su POSICION fija dentro de
-    cada bloque (var_x, var2) -- que puede cruzarse o reordenarse entre
-    combinaciones vecinas de la rejilla -- esta funcion deberia seguir cada
-    estado por continuidad (ej. energia mas cercana, o mayor solapamiento
-    de funcion de onda) entre bloques vecinos, para armar superficies
-    suaves y consistentes aunque COMSOL reordene los estados.
-
-    No se llama desde ningun lado todavia; queda como referencia para
-    cuando se retome esta mejora.
-    """
-    raise NotImplementedError("Tracking por continuidad: pendiente para una futura version.")
+def graficar_densidad_interactivo(x_unicos, y_unicos, Zs, etiquetas, nombre_x, nombre_y,
+                                     nombre_archivo, estado_inicial):
+    """Densidad de probabilidad: envoltorio de graficar_interactivo_3d_2d."""
+    n_estados = Zs.shape[0]
+    graficar_interactivo_3d_2d(
+        eje_h_vals=x_unicos, eje_v_vals=y_unicos,
+        obtener_z=lambda idx: Zs[idx],
+        n_estados=n_estados,
+        nombre_eje_h=nombre_x, nombre_eje_v=nombre_y,
+        obtener_nombre_valor=lambda idx: "Densidad de probabilidad",
+        obtener_titulo_estado=lambda idx: f"{nombre_archivo} - {etiquetas[idx]}",
+        nombre_archivo=nombre_archivo,
+        estado_inicial=estado_inicial,
+    )
 
 
 # =============================================================================
@@ -637,17 +871,26 @@ def main():
             print(f"{nombre_archivo}: DOBLE barrido detectado "
                   f"({info['nombre_x']} x {info['nombre_var2']}), {n_estados_disp} estados disponibles.")
 
-            estado_idx = obtener_estado_3d(n_estados_disp, nombre_archivo)
-            Z = construir_grilla(info["bloques"], info["x_valores"], info["v2_valores"], estado_idx)
+            etiquetas_energia = [f"Estado {i + 1}" for i in range(n_estados_disp)]
+            estado_idx = obtener_estado_unico(etiquetas_energia, nombre_archivo)
 
-            n_nan = int(np.isnan(Z).sum())
-            if n_nan:
-                print(f"Aviso: {n_nan} combinaciones no tienen el estado #{estado_idx + 1} (quedan como huecos).")
-
-            graficar_doble(
-                info["x_valores"], info["v2_valores"], Z,
+            graficar_doble_interactivo(
+                info["bloques"], info["x_valores"], info["v2_valores"],
                 info["nombre_x"], info["nombre_var2"], info["nombre_valor"],
-                titulo=f"{nombre_archivo} - Estado {estado_idx + 1}",
+                nombre_archivo, estado_idx, n_estados_disp,
+            )
+
+        elif info["tipo"] == "densidad":
+            n_estados_disp = len(info["etiquetas"])
+            print(f"{nombre_archivo}: DENSIDAD DE PROBABILIDAD detectada "
+                  f"(grilla {len(info['x_unicos'])} x {len(info['y_unicos'])}), "
+                  f"{n_estados_disp} estados disponibles.")
+
+            estado_idx = obtener_estado_unico(info["etiquetas"], nombre_archivo)
+
+            graficar_densidad_interactivo(
+                info["x_unicos"], info["y_unicos"], info["Zs"], info["etiquetas"],
+                info["nombre_x"], info["nombre_y_espacial"], nombre_archivo, estado_idx,
             )
 
         else:
