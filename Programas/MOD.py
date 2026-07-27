@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 RUTA_ARCHIVO_POR_DEFECTO = r"C:\Users\Admin\Documents\Cuantica_Avanzada\Tablas\p.txt"
 
 # Ruta fija del archivo de salida (para el siguiente programa)
-RUTA_SALIDA_POR_DEFECTO = r"C:\Users\Admin\Documents\Cuantica_Avanzada\Tablas\Grafica FINAL E vs N F0.txt"
+RUTA_SALIDA_POR_DEFECTO = r"C:\Users\Admin\Documents\Cuantica_Avanzada\Tablas\Grafica FINAL E vs R1 F0.txt"
 
 
 def leer_datos(ruta_archivo):
