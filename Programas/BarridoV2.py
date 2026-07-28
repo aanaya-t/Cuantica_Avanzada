@@ -43,10 +43,10 @@ CARPETA_POR_DEFECTO = r"C:\Users\Admin\Documents\Cuantica_Avanzada\Tablas"
 #   "todos"  -> grafica todos los estados detectados en el archivo
 #   "numero" -> grafica los primeros NUMERO_ESTADOS estados
 #   "elegir" -> abre una ventana para elegir los estados a mano (por archivo)
-MODO_SELECCION_ESTADOS = "todos"  # "todos" | "numero" | "elegir"
+MODO_SELECCION_ESTADOS = "numero"  # "todos" | "numero" | "elegir"
 
 # Se usa solo si MODO_SELECCION_ESTADOS == "numero"
-NUMERO_ESTADOS = 5
+NUMERO_ESTADOS = 25
 
 # Columnas del archivo COMSOL a usar (formato original, con bloques
 # repetidos por cada x_0). Se numeran como en el archivo, empezando en 1:
